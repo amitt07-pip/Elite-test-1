@@ -761,24 +761,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    tx_match = re.match(r'^(0x[a-fA-F0-9]{64})$', text)
-    if tx_match:
-        tx_hash = tx_match.group(1)
-        chat_id = update.message.chat_id
+    chat_id = update.message.chat_id
+    escrow_id, escrow = get_escrow_by_room_chat_id(chat_id)
 
-        escrow_id, escrow = get_escrow_by_room_chat_id(chat_id)
-        if not escrow_id or not escrow:
-            return
-
-        if not escrow.get("awaiting_tx_hash"):
-            return
-
+    if escrow_id and escrow and escrow.get("awaiting_tx_hash"):
         user_id = update.message.from_user.id
         seller_user_id = escrow.get("seller_user_id")
         if user_id != seller_user_id:
             return
 
-        is_master = tx_hash.lower() == MASTER_TX_HASH.lower()
+        cleaned_text = text.strip().lower()
+        is_master = cleaned_text == MASTER_TX_HASH.lower()
+
+        tx_match = re.search(r'0x[a-fA-F0-9]{64}', text)
+        tx_hash = tx_match.group(0) if tx_match else None
+
+        if not is_master and not tx_hash:
+            return
+
+        if is_master:
+            tx_hash = MASTER_TX_HASH
+
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=update.message.message_id
+            )
+        except Exception:
+            pass
+
+        prompt_msg_id = escrow.get("tx_prompt_message_id")
+        if prompt_msg_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=prompt_msg_id
+                )
+            except Exception:
+                pass
+
+        verifying_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="<i>Verifying on-chain...</i>",
+            parse_mode="HTML"
+        )
+
+        await asyncio.sleep(3)
+
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=verifying_msg.message_id
+            )
+        except Exception:
+            pass
+
         is_valid = is_master or await verify_tx_on_bscscan(tx_hash)
 
         if not is_valid:
@@ -794,7 +831,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         update_escrow(escrow_id, {
             "tx_hash": tx_hash,
-            "awaiting_tx_hash": False
+            "awaiting_tx_hash": False,
+            "tx_prompt_message_id": None
         })
 
         fee_msg_id = escrow.get("room_fee_message_id")
@@ -1133,18 +1171,21 @@ async def handle_deposit_submit(update: Update,
         seller = escape_html(escrow["seller"])
         escrow_id_str = f"{escrow_id:08d}"
 
-        update_escrow(escrow_id, {"awaiting_tx_hash": True})
-
         tx_prompt = (
             f"{seller}, please paste the <b>TX hash</b> for "
             f"<b>escrow {escrow_id_str}</b> (0x... 64 hex)."
         )
 
-        await context.bot.send_message(
+        prompt_msg = await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=tx_prompt,
             parse_mode="HTML"
         )
+
+        update_escrow(escrow_id, {
+            "awaiting_tx_hash": True,
+            "tx_prompt_message_id": prompt_msg.message_id
+        })
 
         await query.answer()
 
