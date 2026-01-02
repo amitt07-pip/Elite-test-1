@@ -7,6 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
+    ChatJoinRequestHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -366,6 +367,46 @@ def build_opening_room_keyboard(escrow_id):
     return InlineKeyboardMarkup([[button]])
 
 
+def build_room_ready_message(escrow_id, data):
+    seller = escape_html(data["seller"])
+    buyer = escape_html(data["buyer"])
+    amount = data["amount"]
+    rate = data["rate"]
+    total_inr = data["total_inr"]
+    time_val = escape_html(data["time"])
+
+    escrow_id_str = f"{escrow_id:08d}"
+
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>Seller</b>: {seller}
+✅ <b>Buyer</b>: {buyer}
+💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
+💱 <b>Rate</b>: {rate:.1f} INR/USDT
+💰 <b>Total INR</b>: ₹{total_inr:.1f}
+🕒 <b>Time</b>: {time_val}
+
+<b>Status</b>: Moved to private escrow room.
+
+✅<b>Private escrow room created.</b>
+Continue the escrow steps <b>inside the private room</b>.
+Use the buttons below to get your one-time join link."""
+
+    return message
+
+
+def build_join_buttons_keyboard(buyer_invite, seller_invite):
+    buyer_button = InlineKeyboardButton(
+        "🚪 Buyer: Join private escrow group",
+        url=buyer_invite
+    )
+    seller_button = InlineKeyboardButton(
+        "🚪 Seller: Join private escrow group",
+        url=seller_invite
+    )
+    return InlineKeyboardMarkup([[buyer_button], [seller_button]])
+
+
 def is_filled_escrow_form(text):
     text_lower = text.lower()
     has_seller = "seller" in text_lower and ":" in text
@@ -495,8 +536,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("Already confirmed")
                 return
 
-            update_escrow(escrow_id, {"seller_confirmed": True})
+            seller_user_id = query.from_user.id
+            update_escrow(escrow_id, {
+                "seller_confirmed": True,
+                "seller_user_id": seller_user_id
+            })
             escrow["seller_confirmed"] = True
+            escrow["seller_user_id"] = seller_user_id
 
         elif action == "buyer":
             buyer_username = normalize_username(escrow["buyer"])
@@ -511,8 +557,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("Already confirmed")
                 return
 
-            update_escrow(escrow_id, {"buyer_confirmed": True})
+            buyer_user_id = query.from_user.id
+            update_escrow(escrow_id, {
+                "buyer_confirmed": True,
+                "buyer_user_id": buyer_user_id
+            })
             escrow["buyer_confirmed"] = True
+            escrow["buyer_user_id"] = buyer_user_id
 
         seller_ok = escrow["seller_confirmed"]
         buyer_ok = escrow["buyer_confirmed"]
@@ -571,6 +622,46 @@ async def handle_new_chat_members(update: Update,
                 parse_mode="HTML"
             )
 
+            try:
+                buyer_link = await context.bot.create_chat_invite_link(
+                    chat_id=chat_id,
+                    creates_join_request=True,
+                    name="Buyer link"
+                )
+                seller_link = await context.bot.create_chat_invite_link(
+                    chat_id=chat_id,
+                    creates_join_request=True,
+                    name="Seller link"
+                )
+
+                update_escrow(escrow_id, {
+                    "buyer_invite": buyer_link.invite_link,
+                    "seller_invite": seller_link.invite_link
+                })
+
+                original_chat_id = escrow.get("chat_id")
+                original_message_id = escrow.get("message_id")
+
+                if original_chat_id and original_message_id:
+                    updated_escrow = get_escrow(escrow_id)
+                    new_message = build_room_ready_message(
+                        escrow_id, updated_escrow
+                    )
+                    new_keyboard = build_join_buttons_keyboard(
+                        buyer_link.invite_link,
+                        seller_link.invite_link
+                    )
+
+                    await context.bot.edit_message_text(
+                        chat_id=original_chat_id,
+                        message_id=original_message_id,
+                        text=new_message,
+                        parse_mode="HTML",
+                        reply_markup=new_keyboard
+                    )
+            except Exception:
+                pass
+
     try:
         await asyncio.sleep(1)
         await context.bot.delete_message(
@@ -597,6 +688,38 @@ async def handle_left_chat_member(update: Update,
         pass
 
 
+async def handle_join_request(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE):
+    join_request = update.chat_join_request
+    if not join_request:
+        return
+
+    chat_id = join_request.chat.id
+    user_id = join_request.from_user.id
+
+    escrow_id, escrow = get_escrow_by_room_chat_id(chat_id)
+    if not escrow_id or not escrow:
+        try:
+            await join_request.decline()
+        except Exception:
+            pass
+        return
+
+    seller_user_id = escrow.get("seller_user_id")
+    buyer_user_id = escrow.get("buyer_user_id")
+
+    if user_id == seller_user_id or user_id == buyer_user_id:
+        try:
+            await join_request.approve()
+        except Exception:
+            pass
+    else:
+        try:
+            await join_request.decline()
+        except Exception:
+            pass
+
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required")
@@ -610,4 +733,5 @@ new_members_filter = filters.StatusUpdate.NEW_CHAT_MEMBERS
 left_member_filter = filters.StatusUpdate.LEFT_CHAT_MEMBER
 app.add_handler(MessageHandler(new_members_filter, handle_new_chat_members))
 app.add_handler(MessageHandler(left_member_filter, handle_left_chat_member))
+app.add_handler(ChatJoinRequestHandler(handle_join_request))
 app.run_polling()
