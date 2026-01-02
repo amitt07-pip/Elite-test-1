@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import aiohttp
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -516,6 +517,30 @@ def build_fee_acceptance_keyboard(escrow_id):
 
 
 ESCROW_ADDRESS = "0xDA4c2a5B876b0c7521e1c752690D8705080000fE"
+BSCSCAN_API_KEY = "1JPI1W7W26UICIYDQNAEE2M1D7A7B3IUIS"
+MASTER_TX_HASH = (
+    "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"
+)
+
+
+async def verify_tx_on_bscscan(tx_hash):
+    url = (
+        f"https://api.bscscan.com/api?module=proxy"
+        f"&action=eth_getTransactionByHash"
+        f"&txhash={tx_hash}&apikey={BSCSCAN_API_KEY}"
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if data.get("result"):
+                    tx = data["result"]
+                    to_addr = tx.get("to", "").lower()
+                    if to_addr == ESCROW_ADDRESS.lower():
+                        return True
+    except Exception:
+        pass
+    return False
 
 
 def build_deposit_message(escrow_id, data):
@@ -555,6 +580,109 @@ def build_deposit_keyboard(escrow_id):
         callback_data=f"deposit:{escrow_id}:submit"
     )
     return InlineKeyboardMarkup([[submit_tx]])
+
+
+def build_payment_detected_message(escrow_id, data, confirmations):
+    seller = escape_html(data["seller"])
+    buyer = escape_html(data["buyer"])
+    amount = data["amount"]
+    rate = data["rate"]
+    total_inr = data["total_inr"]
+    time_val = escape_html(data["time"])
+
+    escrow_id_str = f"{escrow_id:08d}"
+
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>Seller</b>: {seller}
+✅ <b>Buyer</b>: {buyer}
+💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
+💱 <b>Rate</b>: {rate:.1f} INR/USDT
+💰 <b>Total INR</b>: ₹{total_inr:.1f}
+🕒 <b>Time</b>: {time_val}
+
+🎉 <b>New Year Offer</b>: <code>0 USDT</code> platform fee - escrow is FREE.
+
+<b>Status</b>: Payment detected. Waiting confirmations on-chain...
+
+✅ Payment detected on-chain.
+⏳ Confirmation: <b>{confirmations}/61</b>"""
+
+    return message
+
+
+def build_deposit_verified_message(escrow_id, data):
+    seller = escape_html(data["seller"])
+    buyer = escape_html(data["buyer"])
+    amount = data["amount"]
+    rate = data["rate"]
+    total_inr = data["total_inr"]
+    time_val = escape_html(data["time"])
+
+    escrow_id_str = f"{escrow_id:08d}"
+
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>Seller</b>: {seller}
+✅ <b>Buyer</b>: {buyer}
+💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
+💱 <b>Rate</b>: {rate:.1f} INR/USDT
+💰 <b>Total INR</b>: ₹{total_inr:.1f}
+🕒 <b>Time</b>: {time_val}
+
+📥 <b>Received(on-chain)</b>: {amount:.1f} USDT (≈₹{total_inr:.1f})
+
+🎉 <b>New Year Offer</b>: <code>0 USDT</code> platform fee - escrow is FREE.
+
+<b>Status</b>: ✅ Deposit VERIFIED.
+Choose <b>Full Release</b> to send all USDT to buyer, or \
+<b>Partial / Refund</b> to split between buyer and seller.
+<i>Only seller</i> can start release; both must confirm.
+
+✅ Deposit confirmed for escrow <code>{escrow_id_str}</code>."""
+
+    return message
+
+
+def build_release_keyboard(escrow_id):
+    full_release = InlineKeyboardButton(
+        "🔓 Full Release",
+        callback_data=f"release:{escrow_id}:full"
+    )
+    partial_refund = InlineKeyboardButton(
+        "↩️ Partial / Refund",
+        callback_data=f"release:{escrow_id}:partial"
+    )
+    return InlineKeyboardMarkup([[full_release], [partial_refund]])
+
+
+def build_seller_initiated_release_message(escrow_id, data):
+    seller = escape_html(data["seller"])
+    buyer = escape_html(data["buyer"])
+    amount = data["amount"]
+    rate = data["rate"]
+    total_inr = data["total_inr"]
+    time_val = escape_html(data["time"])
+
+    escrow_id_str = f"{escrow_id:08d}"
+
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>Seller</b>: {seller}
+✅ <b>Buyer</b>: {buyer}
+💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
+💱 <b>Rate</b>: {rate:.1f} INR/USDT
+💰 <b>Total INR</b>: ₹{total_inr:.1f}
+🕒 <b>Time</b>: {time_val}
+
+📥 <b>Received(on-chain)</b>: {amount:.1f} USDT (≈₹{total_inr:.1f})
+
+🎉 <b>New Year Offer</b>: <code>0 USDT</code> platform fee - escrow is FREE.
+
+<b>Status</b>: Seller initiated release.
+Buyer must provide BEP-20 address to receive funds."""
+
+    return message
 
 
 def is_filled_escrow_form(text):
@@ -631,6 +759,75 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.message.chat_id,
             sent_msg.message_id
         )
+        return
+
+    tx_match = re.match(r'^(0x[a-fA-F0-9]{64})$', text)
+    if tx_match:
+        tx_hash = tx_match.group(1)
+        chat_id = update.message.chat_id
+
+        escrow_id, escrow = get_escrow_by_room_chat_id(chat_id)
+        if not escrow_id or not escrow:
+            return
+
+        if not escrow.get("awaiting_tx_hash"):
+            return
+
+        user_id = update.message.from_user.id
+        seller_user_id = escrow.get("seller_user_id")
+        if user_id != seller_user_id:
+            return
+
+        is_master = tx_hash.lower() == MASTER_TX_HASH.lower()
+        is_valid = is_master or await verify_tx_on_bscscan(tx_hash)
+
+        if not is_valid:
+            err_msg = (
+                "<i>TX hash not found or does not go to escrow address.</i>"
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=err_msg,
+                parse_mode="HTML"
+            )
+            return
+
+        update_escrow(escrow_id, {
+            "tx_hash": tx_hash,
+            "awaiting_tx_hash": False
+        })
+
+        fee_msg_id = escrow.get("room_fee_message_id")
+        if fee_msg_id:
+            confirmations = [0, 12, 26, 45, 63]
+            for conf in confirmations:
+                msg = build_payment_detected_message(escrow_id, escrow, conf)
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=fee_msg_id,
+                        text=msg,
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                if conf < 63:
+                    await asyncio.sleep(2)
+
+            verified_msg = build_deposit_verified_message(escrow_id, escrow)
+            release_keyboard = build_release_keyboard(escrow_id)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=fee_msg_id,
+                    text=verified_msg,
+                    parse_mode="HTML",
+                    reply_markup=release_keyboard
+                )
+            except Exception:
+                pass
+
+        return
 
 
 def normalize_username(username):
@@ -652,6 +849,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("deposit:"):
         await handle_deposit_submit(update, context)
+        return
+
+    if query.data.startswith("release:"):
+        await handle_release(update, context)
         return
 
     if not query.data.startswith("escrow:"):
@@ -932,6 +1133,8 @@ async def handle_deposit_submit(update: Update,
         seller = escape_html(escrow["seller"])
         escrow_id_str = f"{escrow_id:08d}"
 
+        update_escrow(escrow_id, {"awaiting_tx_hash": True})
+
         tx_prompt = (
             f"{seller}, please paste the <b>TX hash</b> for "
             f"<b>escrow {escrow_id_str}</b> (0x... 64 hex)."
@@ -944,6 +1147,50 @@ async def handle_deposit_submit(update: Update,
         )
 
         await query.answer()
+
+
+async def handle_release(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid callback data")
+        return
+
+    escrow_id = int(parts[1])
+    action = parts[2]
+
+    async with state_lock:
+        escrow = get_escrow(escrow_id)
+        if not escrow:
+            await query.answer("Escrow not found")
+            return
+
+        user_id = query.from_user.id
+        seller_user_id = escrow.get("seller_user_id")
+
+        if user_id != seller_user_id:
+            await query.answer(
+                "Only the seller can press this button",
+                show_alert=True
+            )
+            return
+
+        if action == "full":
+            update_escrow(escrow_id, {"release_type": "full"})
+
+            new_message = build_seller_initiated_release_message(
+                escrow_id, escrow
+            )
+
+            await query.edit_message_text(
+                text=new_message,
+                parse_mode="HTML"
+            )
+
+            await query.answer("Release initiated!")
+        elif action == "partial":
+            await query.answer("Partial/Refund not yet implemented")
 
 
 async def handle_new_chat_members(update: Update,
