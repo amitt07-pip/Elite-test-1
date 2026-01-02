@@ -12,6 +12,17 @@ from telegram.ext import (
     filters,
 )
 
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.tl.functions.channels import (
+    CreateChannelRequest,
+    InviteToChannelRequest,
+    EditAdminRequest,
+    LeaveChannelRequest,
+)
+from telethon.tl.types import ChatAdminRights
+from telethon import utils as telethon_utils
+
 ESCROW_TEXT = """🛡 *Private Escrow Form*
 _Copy, fill and send in the group\\.
 Only deals with @usernames mentioned will be accepted \\(anti\\-scam\\)\\._
@@ -26,7 +37,15 @@ Time:`
 STATE_FILE = "escrow_state.json"
 ESCROWS_FILE = "escrows.json"
 
+TELETHON_API_ID = 38828234
+TELETHON_API_HASH = "99d96d08bc57f882907032a2f8f65b46"
+TELETHON_SESSION = os.environ.get("TELETHON_SESSION", "")
+
+BOT_USERNAME = "EcroweBot"
+BOT_ID = 8029678424
+
 state_lock = asyncio.Lock()
+telethon_client = None
 
 
 def load_state():
@@ -90,6 +109,78 @@ def update_escrow(escrow_id, updates):
         save_escrows(escrows)
         return True
     return False
+
+
+def get_escrow_by_room_chat_id(room_chat_id):
+    escrows = load_escrows()
+    for eid, data in escrows.items():
+        if data.get("room_chat_id") == room_chat_id:
+            return int(eid), data
+    return None, None
+
+
+async def init_telethon_client():
+    global telethon_client
+    if telethon_client is None and TELETHON_SESSION:
+        telethon_client = TelegramClient(
+            StringSession(TELETHON_SESSION),
+            TELETHON_API_ID,
+            TELETHON_API_HASH
+        )
+        await telethon_client.connect()
+    return telethon_client
+
+
+async def create_escrow_room(escrow_id):
+    client = await init_telethon_client()
+    if not client:
+        return None
+
+    escrow_id_str = f"{escrow_id:08d}"
+    group_title = f"Elite Escrow Group No. {escrow_id_str}"
+
+    result = await client(CreateChannelRequest(
+        title=group_title,
+        about="Private escrow room",
+        megagroup=True
+    ))
+
+    channel = result.chats[0]
+    room_chat_id = telethon_utils.get_peer_id(channel)
+
+    bot_entity = await client.get_entity(BOT_USERNAME)
+
+    await client(InviteToChannelRequest(
+        channel=channel,
+        users=[bot_entity]
+    ))
+
+    admin_rights = ChatAdminRights(
+        change_info=True,
+        post_messages=True,
+        edit_messages=True,
+        delete_messages=True,
+        ban_users=True,
+        invite_users=True,
+        pin_messages=True,
+        add_admins=False,
+        anonymous=False,
+        manage_call=True,
+        other=True
+    )
+
+    await client(EditAdminRequest(
+        channel=channel,
+        user_id=bot_entity,
+        admin_rights=admin_rights,
+        rank="Admin"
+    ))
+
+    await client(LeaveChannelRequest(channel))
+
+    update_escrow(escrow_id, {"room_chat_id": room_chat_id})
+
+    return room_chat_id
 
 
 def parse_escrow_form(text):
@@ -195,7 +286,7 @@ def build_escrow_message(escrow_id, data, seller_confirmed=False,
     seller_note = f"Only {seller} can press Seller Confirm;"
     buyer_note = f"only {buyer} can press Buyer Confirm."
 
-    message = f"""🟢 Escrow • {escrow_id_str}
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
 ━━━━━━━━━━━━━━━━━━━━
 {seller_emoji} <b>Seller</b>: {seller}
 {buyer_emoji} <b>Buyer</b>: {buyer}
@@ -247,7 +338,7 @@ def build_confirmed_message(escrow_id, data):
 
     escrow_id_str = f"{escrow_id:08d}"
 
-    message = f"""🟢 Escrow • {escrow_id_str}
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
 ━━━━━━━━━━━━━━━━━━━━
 ✅ <b>Seller</b>: {seller}
 ✅ <b>Buyer</b>: {buyer}
@@ -430,6 +521,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if both_confirmed:
             new_message = build_confirmed_message(escrow_id, escrow)
             new_keyboard = build_opening_room_keyboard(escrow_id)
+
+            asyncio.create_task(create_escrow_room(escrow_id))
         else:
             new_message = build_escrow_message(
                 escrow_id,
@@ -452,6 +545,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Confirmed!")
 
 
+async def handle_new_chat_members(update: Update,
+                                  context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    chat_id = update.effective_chat.id
+    message_id = update.message.message_id
+
+    new_members = update.message.new_chat_members or []
+    bot_was_added = any(m.id == BOT_ID for m in new_members)
+
+    if bot_was_added:
+        escrow_id, escrow = get_escrow_by_room_chat_id(chat_id)
+        if escrow_id:
+            escrow_id_str = f"{escrow_id:08d}"
+            welcome_msg = (
+                f"<b>Escrow Room</b> <code>{escrow_id_str}</code>\n"
+                "This is the private room for this deal.\n"
+                "The escrow steps will continue here."
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=welcome_msg,
+                parse_mode="HTML"
+            )
+
+    try:
+        await asyncio.sleep(1)
+        await context.bot.delete_message(
+            chat_id=chat_id, message_id=message_id
+        )
+    except Exception:
+        pass
+
+
+async def handle_left_chat_member(update: Update,
+                                  context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    chat_id = update.effective_chat.id
+    message_id = update.message.message_id
+
+    try:
+        await asyncio.sleep(1)
+        await context.bot.delete_message(
+            chat_id=chat_id, message_id=message_id
+        )
+    except Exception:
+        pass
+
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required")
@@ -461,4 +606,8 @@ app.add_handler(
     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
 )
 app.add_handler(CallbackQueryHandler(handle_callback))
+new_members_filter = filters.StatusUpdate.NEW_CHAT_MEMBERS
+left_member_filter = filters.StatusUpdate.LEFT_CHAT_MEMBER
+app.add_handler(MessageHandler(new_members_filter, handle_new_chat_members))
+app.add_handler(MessageHandler(left_member_filter, handle_left_chat_member))
 app.run_polling()
