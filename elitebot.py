@@ -44,6 +44,7 @@ TELETHON_SESSION = os.environ.get("TELETHON_SESSION", "")
 
 BOT_USERNAME = "EcroweBot"
 BOT_ID = 8029678424
+USERBOT_ID = None
 
 state_lock = asyncio.Lock()
 telethon_client = None
@@ -121,7 +122,7 @@ def get_escrow_by_room_chat_id(room_chat_id):
 
 
 async def init_telethon_client():
-    global telethon_client
+    global telethon_client, USERBOT_ID
     if telethon_client is None and TELETHON_SESSION:
         telethon_client = TelegramClient(
             StringSession(TELETHON_SESSION),
@@ -129,6 +130,8 @@ async def init_telethon_client():
             TELETHON_API_HASH
         )
         await telethon_client.connect()
+        me = await telethon_client.get_me()
+        USERBOT_ID = me.id
     return telethon_client
 
 
@@ -407,6 +410,111 @@ def build_join_buttons_keyboard(buyer_invite, seller_invite):
     return InlineKeyboardMarkup([[buyer_button], [seller_button]])
 
 
+def build_vouch_keyboard(escrow_id):
+    button = InlineKeyboardButton(
+        "✅Vouch Elite Escrow Bot",
+        callback_data=f"escrow:{escrow_id}:noop"
+    )
+    return InlineKeyboardMarkup([[button]])
+
+
+def build_fee_selection_message(escrow_id, data):
+    seller = escape_html(data["seller"])
+    buyer = escape_html(data["buyer"])
+    amount = data["amount"]
+    rate = data["rate"]
+    total_inr = data["total_inr"]
+    time_val = escape_html(data["time"])
+
+    escrow_id_str = f"{escrow_id:08d}"
+
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>Seller</b>: {seller}
+✅ <b>Buyer</b>: {buyer}
+💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
+💱 <b>Rate</b>: {rate:.1f} INR/USDT
+💰 <b>Total INR</b>: ₹{total_inr:.1f}
+🕒 <b>Time</b>: {time_val}
+
+🎉 <b>New Year Offer</b>: <code>0 USDT</code> platform fee - escrow is FREE.
+
+<b>Status</b>: Choose who bears the platform fee.
+<b>Both parties</b> must accept the selected mode."""
+
+    return message
+
+
+def build_fee_selection_keyboard(escrow_id):
+    buyer_pays = InlineKeyboardButton(
+        "Fee: Buyer pays",
+        callback_data=f"fee:{escrow_id}:buyer_pays"
+    )
+    seller_pays = InlineKeyboardButton(
+        "Seller pays",
+        callback_data=f"fee:{escrow_id}:seller_pays"
+    )
+    split = InlineKeyboardButton(
+        "Fee: Split",
+        callback_data=f"fee:{escrow_id}:split"
+    )
+    return InlineKeyboardMarkup([[buyer_pays], [seller_pays], [split]])
+
+
+def build_fee_acceptance_message(escrow_id, data, seller_accepted=False,
+                                 buyer_accepted=False):
+    seller = escape_html(data["seller"])
+    buyer = escape_html(data["buyer"])
+    amount = data["amount"]
+    rate = data["rate"]
+    total_inr = data["total_inr"]
+    time_val = escape_html(data["time"])
+
+    escrow_id_str = f"{escrow_id:08d}"
+
+    seller_emoji = "✅" if seller_accepted else "⏳"
+    buyer_emoji = "✅" if buyer_accepted else "⏳"
+
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>Seller</b>: {seller}
+✅ <b>Buyer</b>: {buyer}
+💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
+💱 <b>Rate</b>: {rate:.1f} INR/USDT
+💰 <b>Total INR</b>: ₹{total_inr:.1f}
+🕒 <b>Time</b>: {time_val}
+
+🎉 <b>New Year Offer</b>: <code>0 USDT</code> platform fee - escrow is FREE.
+
+<b>Status</b>: Fee mode selected.
+{seller_emoji}Seller fee agreement
+{buyer_emoji}Buyer fee agreement
+<b>Note</b>: Once both accept, deposit instructions will appear.
+<b>Important</b>: Even if INR side fails/ cancels, platform may still \
+charge fees as agreed off-chain."""
+
+    return message
+
+
+def build_fee_acceptance_keyboard(escrow_id):
+    seller_accepts = InlineKeyboardButton(
+        "✅ Seller accepts...",
+        callback_data=f"feeaccept:{escrow_id}:seller"
+    )
+    buyer_accepts = InlineKeyboardButton(
+        "✅ Buyer accepts...",
+        callback_data=f"feeaccept:{escrow_id}:buyer"
+    )
+    change_fees = InlineKeyboardButton(
+        "↩️Change fees",
+        callback_data=f"feeaccept:{escrow_id}:change"
+    )
+    return InlineKeyboardMarkup([
+        [seller_accepts, buyer_accepts],
+        [change_fees]
+    ])
+
+
 def is_filled_escrow_form(text):
     text_lower = text.lower()
     has_seller = "seller" in text_lower and ":" in text
@@ -491,6 +599,14 @@ def normalize_username(username):
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+
+    if query.data.startswith("fee:"):
+        await handle_fee_selection(update, context)
+        return
+
+    if query.data.startswith("feeaccept:"):
+        await handle_fee_acceptance(update, context)
+        return
 
     if not query.data.startswith("escrow:"):
         return
@@ -596,6 +712,142 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Confirmed!")
 
 
+async def handle_fee_selection(update: Update,
+                               context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid callback data")
+        return
+
+    escrow_id = int(parts[1])
+    fee_mode = parts[2]
+
+    async with state_lock:
+        escrow = get_escrow(escrow_id)
+        if not escrow:
+            await query.answer("Escrow not found")
+            return
+
+        user_id = query.from_user.id
+        seller_user_id = escrow.get("seller_user_id")
+
+        if user_id != seller_user_id:
+            await query.answer(
+                "Only the seller can select the fee mode",
+                show_alert=True
+            )
+            return
+
+        update_escrow(escrow_id, {
+            "fee_mode": fee_mode,
+            "seller_fee_accepted": False,
+            "buyer_fee_accepted": False
+        })
+
+        escrow = get_escrow(escrow_id)
+        new_message = build_fee_acceptance_message(escrow_id, escrow)
+        new_keyboard = build_fee_acceptance_keyboard(escrow_id)
+
+        await query.edit_message_text(
+            text=new_message,
+            parse_mode="HTML",
+            reply_markup=new_keyboard
+        )
+
+        await query.answer("Fee mode selected!")
+
+
+async def handle_fee_acceptance(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid callback data")
+        return
+
+    escrow_id = int(parts[1])
+    action = parts[2]
+
+    async with state_lock:
+        escrow = get_escrow(escrow_id)
+        if not escrow:
+            await query.answer("Escrow not found")
+            return
+
+        user_id = query.from_user.id
+        seller_user_id = escrow.get("seller_user_id")
+        buyer_user_id = escrow.get("buyer_user_id")
+
+        if action == "change":
+            update_escrow(escrow_id, {
+                "fee_mode": None,
+                "seller_fee_accepted": False,
+                "buyer_fee_accepted": False
+            })
+
+            escrow = get_escrow(escrow_id)
+            new_message = build_fee_selection_message(escrow_id, escrow)
+            new_keyboard = build_fee_selection_keyboard(escrow_id)
+
+            await query.edit_message_text(
+                text=new_message,
+                parse_mode="HTML",
+                reply_markup=new_keyboard
+            )
+
+            await query.answer("Fee mode reset!")
+            return
+
+        if action == "seller":
+            if user_id != seller_user_id:
+                await query.answer(
+                    "Only the seller can press this button",
+                    show_alert=True
+                )
+                return
+
+            if escrow.get("seller_fee_accepted"):
+                await query.answer("Already accepted")
+                return
+
+            update_escrow(escrow_id, {"seller_fee_accepted": True})
+            escrow["seller_fee_accepted"] = True
+
+        elif action == "buyer":
+            if user_id != buyer_user_id:
+                await query.answer(
+                    "Only the buyer can press this button",
+                    show_alert=True
+                )
+                return
+
+            if escrow.get("buyer_fee_accepted"):
+                await query.answer("Already accepted")
+                return
+
+            update_escrow(escrow_id, {"buyer_fee_accepted": True})
+            escrow["buyer_fee_accepted"] = True
+
+        new_message = build_fee_acceptance_message(
+            escrow_id,
+            escrow,
+            seller_accepted=escrow.get("seller_fee_accepted", False),
+            buyer_accepted=escrow.get("buyer_fee_accepted", False)
+        )
+        new_keyboard = build_fee_acceptance_keyboard(escrow_id)
+
+        await query.edit_message_text(
+            text=new_message,
+            parse_mode="HTML",
+            reply_markup=new_keyboard
+        )
+
+        await query.answer("Accepted!")
+
+
 async def handle_new_chat_members(update: Update,
                                   context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -621,6 +873,19 @@ async def handle_new_chat_members(update: Update,
                 text=welcome_msg,
                 parse_mode="HTML"
             )
+
+            fee_msg = build_fee_selection_message(escrow_id, escrow)
+            fee_keyboard = build_fee_selection_keyboard(escrow_id)
+            sent_fee_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=fee_msg,
+                parse_mode="HTML",
+                reply_markup=fee_keyboard
+            )
+
+            update_escrow(escrow_id, {
+                "room_fee_message_id": sent_fee_msg.message_id
+            })
 
             try:
                 buyer_link = await context.bot.create_chat_invite_link(
@@ -662,13 +927,13 @@ async def handle_new_chat_members(update: Update,
             except Exception:
                 pass
 
-    try:
-        await asyncio.sleep(1)
-        await context.bot.delete_message(
-            chat_id=chat_id, message_id=message_id
-        )
-    except Exception:
-        pass
+        try:
+            await asyncio.sleep(1)
+            await context.bot.delete_message(
+                chat_id=chat_id, message_id=message_id
+            )
+        except Exception:
+            pass
 
 
 async def handle_left_chat_member(update: Update,
@@ -679,13 +944,18 @@ async def handle_left_chat_member(update: Update,
     chat_id = update.effective_chat.id
     message_id = update.message.message_id
 
-    try:
-        await asyncio.sleep(1)
-        await context.bot.delete_message(
-            chat_id=chat_id, message_id=message_id
-        )
-    except Exception:
-        pass
+    left_member = update.message.left_chat_member
+    if not left_member:
+        return
+
+    if USERBOT_ID and left_member.id == USERBOT_ID:
+        try:
+            await asyncio.sleep(1)
+            await context.bot.delete_message(
+                chat_id=chat_id, message_id=message_id
+            )
+        except Exception:
+            pass
 
 
 async def handle_join_request(update: Update,
@@ -708,14 +978,51 @@ async def handle_join_request(update: Update,
     seller_user_id = escrow.get("seller_user_id")
     buyer_user_id = escrow.get("buyer_user_id")
 
-    if user_id == seller_user_id or user_id == buyer_user_id:
+    if user_id == seller_user_id:
         try:
             await join_request.approve()
+            update_escrow(escrow_id, {"seller_joined": True})
+            escrow = get_escrow(escrow_id)
+            if escrow.get("seller_joined") and escrow.get("buyer_joined"):
+                await update_original_message_to_vouch(
+                    context, escrow_id, escrow
+                )
+        except Exception:
+            pass
+    elif user_id == buyer_user_id:
+        try:
+            await join_request.approve()
+            update_escrow(escrow_id, {"buyer_joined": True})
+            escrow = get_escrow(escrow_id)
+            if escrow.get("seller_joined") and escrow.get("buyer_joined"):
+                await update_original_message_to_vouch(
+                    context, escrow_id, escrow
+                )
         except Exception:
             pass
     else:
         try:
             await join_request.decline()
+        except Exception:
+            pass
+
+
+async def update_original_message_to_vouch(context, escrow_id, escrow):
+    original_chat_id = escrow.get("chat_id")
+    original_message_id = escrow.get("message_id")
+
+    if original_chat_id and original_message_id:
+        new_message = build_room_ready_message(escrow_id, escrow)
+        new_keyboard = build_vouch_keyboard(escrow_id)
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=original_chat_id,
+                message_id=original_message_id,
+                text=new_message,
+                parse_mode="HTML",
+                reply_markup=new_keyboard
+            )
         except Exception:
             pass
 
