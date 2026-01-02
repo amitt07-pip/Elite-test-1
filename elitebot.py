@@ -451,7 +451,7 @@ def build_fee_selection_keyboard(escrow_id):
         callback_data=f"fee:{escrow_id}:buyer_pays"
     )
     seller_pays = InlineKeyboardButton(
-        "Seller pays",
+        "Fee: Seller pays",
         callback_data=f"fee:{escrow_id}:seller_pays"
     )
     split = InlineKeyboardButton(
@@ -513,6 +513,48 @@ def build_fee_acceptance_keyboard(escrow_id):
         [seller_accepts, buyer_accepts],
         [change_fees]
     ])
+
+
+ESCROW_ADDRESS = "0xDA4c2a5B876b0c7521e1c752690D8705080000fE"
+
+
+def build_deposit_message(escrow_id, data):
+    seller = escape_html(data["seller"])
+    buyer = escape_html(data["buyer"])
+    amount = data["amount"]
+    rate = data["rate"]
+    total_inr = data["total_inr"]
+    time_val = escape_html(data["time"])
+
+    escrow_id_str = f"{escrow_id:08d}"
+
+    message = f"""🟢 Escrow • <code>{escrow_id_str}</code>
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>Seller</b>: {seller}
+✅ <b>Buyer</b>: {buyer}
+💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
+💱 <b>Rate</b>: {rate:.1f} INR/USDT
+💰 <b>Total INR</b>: ₹{total_inr:.1f}
+🕒 <b>Time</b>: {time_val}
+
+🎉 <b>New Year Offer</b>: <code>0 USDT</code> platform fee - escrow is FREE.
+
+<b>Status</b>: Confirmed &amp; fees agreed.
+📥 Deposit
+Send USDT to
+<code>{ESCROW_ADDRESS}</code>
+Then tap <b>I paid - Submit TX hash</b> below and paste your TX hash \
+(0x...)."""
+
+    return message
+
+
+def build_deposit_keyboard(escrow_id):
+    submit_tx = InlineKeyboardButton(
+        "💸 I paid - Submit TX hash",
+        callback_data=f"deposit:{escrow_id}:submit"
+    )
+    return InlineKeyboardMarkup([[submit_tx]])
 
 
 def is_filled_escrow_form(text):
@@ -606,6 +648,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("feeaccept:"):
         await handle_fee_acceptance(update, context)
+        return
+
+    if query.data.startswith("deposit:"):
+        await handle_deposit_submit(update, context)
         return
 
     if not query.data.startswith("escrow:"):
@@ -831,13 +877,21 @@ async def handle_fee_acceptance(update: Update,
             update_escrow(escrow_id, {"buyer_fee_accepted": True})
             escrow["buyer_fee_accepted"] = True
 
-        new_message = build_fee_acceptance_message(
-            escrow_id,
-            escrow,
-            seller_accepted=escrow.get("seller_fee_accepted", False),
-            buyer_accepted=escrow.get("buyer_fee_accepted", False)
-        )
-        new_keyboard = build_fee_acceptance_keyboard(escrow_id)
+        seller_accepted = escrow.get("seller_fee_accepted", False)
+        buyer_accepted = escrow.get("buyer_fee_accepted", False)
+        both_accepted = seller_accepted and buyer_accepted
+
+        if both_accepted:
+            new_message = build_deposit_message(escrow_id, escrow)
+            new_keyboard = build_deposit_keyboard(escrow_id)
+        else:
+            new_message = build_fee_acceptance_message(
+                escrow_id,
+                escrow,
+                seller_accepted=seller_accepted,
+                buyer_accepted=buyer_accepted
+            )
+            new_keyboard = build_fee_acceptance_keyboard(escrow_id)
 
         await query.edit_message_text(
             text=new_message,
@@ -846,6 +900,50 @@ async def handle_fee_acceptance(update: Update,
         )
 
         await query.answer("Accepted!")
+
+
+async def handle_deposit_submit(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid callback data")
+        return
+
+    escrow_id = int(parts[1])
+
+    async with state_lock:
+        escrow = get_escrow(escrow_id)
+        if not escrow:
+            await query.answer("Escrow not found")
+            return
+
+        user_id = query.from_user.id
+        seller_user_id = escrow.get("seller_user_id")
+
+        if user_id != seller_user_id:
+            await query.answer(
+                "Only the seller can press this button",
+                show_alert=True
+            )
+            return
+
+        seller = escape_html(escrow["seller"])
+        escrow_id_str = f"{escrow_id:08d}"
+
+        tx_prompt = (
+            f"{seller}, please paste the <b>TX hash</b> for "
+            f"<b>escrow {escrow_id_str}</b> (0x... 64 hex)."
+        )
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=tx_prompt,
+            parse_mode="HTML"
+        )
+
+        await query.answer()
 
 
 async def handle_new_chat_members(update: Update,
