@@ -648,7 +648,7 @@ def build_release_keyboard(escrow_id):
         callback_data=f"release:{escrow_id}:full"
     )
     partial_refund = InlineKeyboardButton(
-        "↩️ Partial / Refund",
+        "🧩 Partial / Refund",
         callback_data=f"release:{escrow_id}:partial"
     )
     return InlineKeyboardMarkup([[full_release, partial_refund]])
