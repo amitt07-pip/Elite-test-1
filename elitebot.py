@@ -237,6 +237,44 @@ def build_escrow_keyboard(escrow_id, seller_confirmed=False,
     return None
 
 
+def build_confirmed_message(escrow_id, data):
+    seller = escape_html(data["seller"])
+    buyer = escape_html(data["buyer"])
+    amount = data["amount"]
+    rate = data["rate"]
+    total_inr = data["total_inr"]
+    time_val = escape_html(data["time"])
+
+    escrow_id_str = f"{escrow_id:08d}"
+
+    message = f"""🟢 Escrow • {escrow_id_str}
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>Seller</b>: {seller}
+✅ <b>Buyer</b>: {buyer}
+💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
+💱 <b>Rate</b>: {rate:.1f} INR/USDT
+💰 <b>Total INR</b>: ₹{total_inr:.1f}
+🕒 <b>Time</b>: {time_val}
+
+<b>Status</b>: Moved to private escrow room.
+
+✅<b>Private escrow room created.</b>
+Continue the escrow steps <b>inside the private room</b>.
+Use the buttons below to get your one-time join link.
+
+<b>Status</b>: Opening private escrow room..."""
+
+    return message
+
+
+def build_opening_room_keyboard(escrow_id):
+    button = InlineKeyboardButton(
+        "⏳ Opening private escrow room...",
+        callback_data=f"escrow:{escrow_id}:noop"
+    )
+    return InlineKeyboardMarkup([[button]])
+
+
 def is_filled_escrow_form(text):
     text_lower = text.lower()
     has_seller = "seller" in text_lower and ":" in text
@@ -333,6 +371,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     escrow_id = int(parts[1])
     action = parts[2]
 
+    if action == "noop":
+        await query.answer()
+        return
+
     async with state_lock:
         escrow = get_escrow(escrow_id)
         if not escrow:
@@ -381,17 +423,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_escrow(escrow_id, {"buyer_confirmed": True})
             escrow["buyer_confirmed"] = True
 
-        new_message = build_escrow_message(
-            escrow_id,
-            escrow,
-            seller_confirmed=escrow["seller_confirmed"],
-            buyer_confirmed=escrow["buyer_confirmed"]
-        )
-        new_keyboard = build_escrow_keyboard(
-            escrow_id,
-            seller_confirmed=escrow["seller_confirmed"],
-            buyer_confirmed=escrow["buyer_confirmed"]
-        )
+        seller_ok = escrow["seller_confirmed"]
+        buyer_ok = escrow["buyer_confirmed"]
+        both_confirmed = seller_ok and buyer_ok
+
+        if both_confirmed:
+            new_message = build_confirmed_message(escrow_id, escrow)
+            new_keyboard = build_opening_room_keyboard(escrow_id)
+        else:
+            new_message = build_escrow_message(
+                escrow_id,
+                escrow,
+                seller_confirmed=escrow["seller_confirmed"],
+                buyer_confirmed=escrow["buyer_confirmed"]
+            )
+            new_keyboard = build_escrow_keyboard(
+                escrow_id,
+                seller_confirmed=escrow["seller_confirmed"],
+                buyer_confirmed=escrow["buyer_confirmed"]
+            )
 
         await query.edit_message_text(
             text=new_message,
