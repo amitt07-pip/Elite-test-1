@@ -1,3 +1,5 @@
+import os
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -27,7 +29,11 @@ async def group_dd_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="MarkdownV2"
             )
 
-app = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is required")
+
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(
     MessageHandler(filters.TEXT & ~filters.COMMAND, group_dd_reply)
 )
