@@ -637,9 +637,7 @@ def build_deposit_verified_message(escrow_id, data):
 <b>Status</b>: ✅ Deposit VERIFIED.
 Choose <b>Full Release</b> to send all USDT to buyer, or \
 <b>Partial / Refund</b> to split between buyer and seller.
-<i>Only seller</i> can start release; both must confirm.
-
-✅ Deposit confirmed for escrow <code>{escrow_id_str}</code>."""
+<i>Only seller</i> can start release; both must confirm."""
 
     return message
 
@@ -653,7 +651,7 @@ def build_release_keyboard(escrow_id):
         "↩️ Partial / Refund",
         callback_data=f"release:{escrow_id}:partial"
     )
-    return InlineKeyboardMarkup([[full_release], [partial_refund]])
+    return InlineKeyboardMarkup([[full_release, partial_refund]])
 
 
 def build_seller_initiated_release_message(escrow_id, data):
