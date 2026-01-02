@@ -3,9 +3,10 @@ import json
 import os
 import re
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -23,6 +24,9 @@ Time:`
 """
 
 STATE_FILE = "escrow_state.json"
+ESCROWS_FILE = "escrows.json"
+
+state_lock = asyncio.Lock()
 
 
 def load_state():
@@ -37,12 +41,55 @@ def save_state(state):
         json.dump(state, f)
 
 
+def load_escrows():
+    if os.path.exists(ESCROWS_FILE):
+        with open(ESCROWS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_escrows(escrows):
+    with open(ESCROWS_FILE, "w") as f:
+        json.dump(escrows, f)
+
+
 def get_next_escrow_id():
     state = load_state()
     escrow_id = state["next_id"]
     state["next_id"] = escrow_id + 1
     save_state(state)
     return escrow_id
+
+
+def save_escrow(escrow_id, data, chat_id, message_id):
+    escrows = load_escrows()
+    escrows[str(escrow_id)] = {
+        "seller": data["seller"],
+        "buyer": data["buyer"],
+        "amount": data["amount"],
+        "rate": data["rate"],
+        "time": data["time"],
+        "total_inr": data["total_inr"],
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "seller_confirmed": False,
+        "buyer_confirmed": False,
+    }
+    save_escrows(escrows)
+
+
+def get_escrow(escrow_id):
+    escrows = load_escrows()
+    return escrows.get(str(escrow_id))
+
+
+def update_escrow(escrow_id, updates):
+    escrows = load_escrows()
+    if str(escrow_id) in escrows:
+        escrows[str(escrow_id)].update(updates)
+        save_escrows(escrows)
+        return True
+    return False
 
 
 def parse_escrow_form(text):
@@ -131,7 +178,8 @@ def escape_html(text):
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def build_escrow_message(escrow_id, data):
+def build_escrow_message(escrow_id, data, seller_confirmed=False,
+                         buyer_confirmed=False):
     seller = escape_html(data["seller"])
     buyer = escape_html(data["buyer"])
     amount = data["amount"]
@@ -141,13 +189,16 @@ def build_escrow_message(escrow_id, data):
 
     escrow_id_str = f"{escrow_id:08d}"
 
+    seller_emoji = "✅" if seller_confirmed else "⏳"
+    buyer_emoji = "✅" if buyer_confirmed else "⏳"
+
     seller_note = f"Only {seller} can press Seller Confirm;"
     buyer_note = f"only {buyer} can press Buyer Confirm."
 
     message = f"""🟢 Escrow • {escrow_id_str}
 ━━━━━━━━━━━━━━━━━━━━
-⏳ <b>Seller</b>: {seller}
-⏳ <b>Buyer</b>: {buyer}
+{seller_emoji} <b>Seller</b>: {seller}
+{buyer_emoji} <b>Buyer</b>: {buyer}
 💵 <b>Amount</b>: {amount:.1f} USDT (BEP-20)
 💱 <b>Rate</b>: {rate:.1f} INR/USDT
 💰 <b>Total INR</b>: ₹{total_inr:.1f}
@@ -159,6 +210,31 @@ def build_escrow_message(escrow_id, data):
 <i>{seller_note} {buyer_note}</i>"""
 
     return message
+
+
+def build_escrow_keyboard(escrow_id, seller_confirmed=False,
+                          buyer_confirmed=False):
+    buttons = []
+
+    if not seller_confirmed:
+        buttons.append(
+            InlineKeyboardButton(
+                "✅ Seller Confirm",
+                callback_data=f"escrow:{escrow_id}:seller"
+            )
+        )
+
+    if not buyer_confirmed:
+        buttons.append(
+            InlineKeyboardButton(
+                "✅ Buyer Confirm",
+                callback_data=f"escrow:{escrow_id}:buyer"
+            )
+        )
+
+    if buttons:
+        return InlineKeyboardMarkup([buttons])
+    return None
 
 
 def is_filled_escrow_form(text):
@@ -220,12 +296,110 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         escrow_id = get_next_escrow_id()
         escrow_message = build_escrow_message(escrow_id, validated)
+        keyboard = build_escrow_keyboard(escrow_id)
 
-        await context.bot.send_message(
+        sent_msg = await context.bot.send_message(
             chat_id=update.message.chat_id,
             text=escrow_message,
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=keyboard
         )
+
+        save_escrow(
+            escrow_id,
+            validated,
+            update.message.chat_id,
+            sent_msg.message_id
+        )
+
+
+def normalize_username(username):
+    if not username:
+        return None
+    return username.lstrip("@").lower()
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    if not query.data.startswith("escrow:"):
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Invalid callback data")
+        return
+
+    escrow_id = int(parts[1])
+    action = parts[2]
+
+    async with state_lock:
+        escrow = get_escrow(escrow_id)
+        if not escrow:
+            await query.answer("Escrow not found")
+            return
+
+        user_username = normalize_username(
+            query.from_user.username if query.from_user else None
+        )
+
+        if not user_username:
+            await query.answer(
+                "You need a username to confirm", show_alert=True
+            )
+            return
+
+        if action == "seller":
+            seller_username = normalize_username(escrow["seller"])
+            if user_username != seller_username:
+                await query.answer(
+                    "Only the seller can press this button",
+                    show_alert=True
+                )
+                return
+
+            if escrow["seller_confirmed"]:
+                await query.answer("Already confirmed")
+                return
+
+            update_escrow(escrow_id, {"seller_confirmed": True})
+            escrow["seller_confirmed"] = True
+
+        elif action == "buyer":
+            buyer_username = normalize_username(escrow["buyer"])
+            if user_username != buyer_username:
+                await query.answer(
+                    "Only the buyer can press this button",
+                    show_alert=True
+                )
+                return
+
+            if escrow["buyer_confirmed"]:
+                await query.answer("Already confirmed")
+                return
+
+            update_escrow(escrow_id, {"buyer_confirmed": True})
+            escrow["buyer_confirmed"] = True
+
+        new_message = build_escrow_message(
+            escrow_id,
+            escrow,
+            seller_confirmed=escrow["seller_confirmed"],
+            buyer_confirmed=escrow["buyer_confirmed"]
+        )
+        new_keyboard = build_escrow_keyboard(
+            escrow_id,
+            seller_confirmed=escrow["seller_confirmed"],
+            buyer_confirmed=escrow["buyer_confirmed"]
+        )
+
+        await query.edit_message_text(
+            text=new_message,
+            parse_mode="HTML",
+            reply_markup=new_keyboard
+        )
+
+        await query.answer("Confirmed!")
 
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -236,4 +410,5 @@ app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(
     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
 )
+app.add_handler(CallbackQueryHandler(handle_callback))
 app.run_polling()
