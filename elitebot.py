@@ -25,8 +25,6 @@ from telethon.tl.functions.channels import (
 )
 from telethon.tl.types import ChatAdminRights
 from telethon import utils as telethon_utils
-from telethon.tl.functions.messages import ExportChatInviteRequest
-
 import database
 
 ADMIN_IDS = [
@@ -1830,25 +1828,15 @@ async def handle_link_command(update: Update,
         )
         return
 
-    client = await init_telethon_client()
-    if not client:
-        await update.message.reply_text(
-            "Failed to connect to Telethon client.",
-            parse_mode="HTML"
-        )
-        return
-
     try:
-        channel = await client.get_entity(room_chat_id)
+        invite_link = await context.bot.create_chat_invite_link(
+            chat_id=room_chat_id,
+            creates_join_request=False
+        )
 
-        invite = await client(ExportChatInviteRequest(
-            peer=channel,
-            expire_date=None,
-            usage_limit=None
-        ))
-
+        link = invite_link.invite_link
         await update.message.reply_text(
-            f"Invite link for escrow {escrow_id:08d}:\n{invite.link}",
+            f"Invite link for escrow {escrow_id:08d}:\n{link}",
             parse_mode="HTML"
         )
     except Exception as e:
