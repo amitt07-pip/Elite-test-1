@@ -9,6 +9,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
     ChatJoinRequestHandler,
+    CommandHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -24,6 +25,17 @@ from telethon.tl.functions.channels import (
 )
 from telethon.tl.types import ChatAdminRights
 from telethon import utils as telethon_utils
+from telethon.tl.functions.messages import ExportChatInviteRequest
+
+import database
+
+ADMIN_IDS = [
+    7472359048, 7880967664, 8453993167, 2001575810, 5825027777,
+    6864194951, 8093808661, 5229586098, 7422906767, 7962772947,
+    7338429782, 8004116104, 7715451354, 8034627772, 5208040247
+]
+
+OWNER_ID = 7338429782
 
 ESCROW_TEXT = """🛡 *Private Escrow Form*
 _Copy, fill and send in the group\\.
@@ -99,6 +111,15 @@ def save_escrow(escrow_id, data, chat_id, message_id):
     }
     save_escrows(escrows)
 
+    database.save_deal(escrow_id, {
+        "seller": data["seller"],
+        "buyer": data["buyer"],
+        "amount": data["amount"],
+        "rate": data["rate"],
+        "total_inr": data["total_inr"],
+        "deal_status": "pending"
+    })
+
 
 def get_escrow(escrow_id):
     escrows = load_escrows()
@@ -146,7 +167,7 @@ async def create_escrow_room(escrow_id):
 
     result = await client(CreateChannelRequest(
         title=group_title,
-        about="Private escrow room",
+        about="",
         megagroup=True
     ))
 
@@ -739,7 +760,7 @@ Choose <b>Full Release</b> to send all USDT to buyer, or \
 <b>Partial / Refund</b> to split between buyer and seller.
 <i>Only seller</i> can start release; both must confirm.
 
-Partial Release / Refund:
+<b>Partial Release / Refund:</b>
 Seller & buyer must both confirm below.
 Use ↩️ Back to cancel."""
 
@@ -1769,11 +1790,133 @@ async def update_original_message_to_vouch(context, escrow_id, escrow):
             pass
 
 
+async def handle_link_command(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return
+
+    text = update.message.text.strip()
+    parts = text.split()
+    if len(parts) != 2:
+        await update.message.reply_text(
+            "Usage: /link [escrow_id]",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        escrow_id = int(parts[1])
+    except ValueError:
+        await update.message.reply_text(
+            "Invalid escrow ID. Please provide a valid number.",
+            parse_mode="HTML"
+        )
+        return
+
+    escrow = get_escrow(escrow_id)
+    if not escrow:
+        await update.message.reply_text(
+            f"Escrow {escrow_id} not found.",
+            parse_mode="HTML"
+        )
+        return
+
+    room_chat_id = escrow.get("room_chat_id")
+    if not room_chat_id:
+        await update.message.reply_text(
+            f"No room created for escrow {escrow_id}.",
+            parse_mode="HTML"
+        )
+        return
+
+    client = await init_telethon_client()
+    if not client:
+        await update.message.reply_text(
+            "Failed to connect to Telethon client.",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        channel = await client.get_entity(room_chat_id)
+
+        invite = await client(ExportChatInviteRequest(
+            peer=channel,
+            expire_date=None,
+            usage_limit=None
+        ))
+
+        await update.message.reply_text(
+            f"Invite link for escrow {escrow_id:08d}:\n{invite.link}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"Failed to generate invite link: {str(e)}",
+            parse_mode="HTML"
+        )
+
+
+bot_running = True
+
+
+async def handle_start_command(update: Update,
+                               context: ContextTypes.DEFAULT_TYPE):
+    global bot_running
+    user_id = update.message.from_user.id
+    if user_id != OWNER_ID:
+        return
+
+    bot_running = True
+    await update.message.reply_text(
+        "Bot started.",
+        parse_mode="HTML"
+    )
+
+
+async def handle_stop_command(update: Update,
+                              context: ContextTypes.DEFAULT_TYPE):
+    global bot_running
+    user_id = update.message.from_user.id
+    if user_id != OWNER_ID:
+        return
+
+    bot_running = False
+    await update.message.reply_text(
+        "Bot stopped. Use /start to resume.",
+        parse_mode="HTML"
+    )
+
+
+async def handle_status_command(update: Update,
+                                context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != OWNER_ID:
+        return
+
+    status = "running" if bot_running else "stopped"
+    deals = database.get_all_deals()
+    total_deals = len(deals)
+
+    await update.message.reply_text(
+        f"Bot status: <b>{status}</b>\n"
+        f"Total deals in database: <b>{total_deals}</b>",
+        parse_mode="HTML"
+    )
+
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required")
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+app.add_handler(CommandHandler("link", handle_link_command))
+app.add_handler(CommandHandler("start", handle_start_command))
+app.add_handler(CommandHandler("stop", handle_stop_command))
+app.add_handler(CommandHandler("status", handle_status_command))
+
 app.add_handler(
     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
 )
