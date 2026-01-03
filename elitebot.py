@@ -535,14 +535,35 @@ def build_fee_acceptance_keyboard(escrow_id):
     ])
 
 
-ESCROW_ADDRESS = "0xDA4c2a5B876b0c7521e1c752690D8705080000fE"
+ESCROW_ADDRESSES = [
+    "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
+    "0xf282e789e835ed379aea84ece204d2d643e6774f"
+]
 BSCSCAN_API_KEY = "1JPI1W7W26UICIYDQNAEE2M1D7A7B3IUIS"
+
+
+def get_next_escrow_address():
+    state = load_state()
+    last_index = state.get("last_address_index", 1)
+    next_index = (last_index + 1) % 2
+    state["last_address_index"] = next_index
+    save_state(state)
+    return ESCROW_ADDRESSES[next_index]
+
+
+def get_escrow_address_for_verification(escrow):
+    addr = escrow.get("escrow_address")
+    if addr:
+        return addr
+    return ESCROW_ADDRESSES[0]
+
+
 MASTER_TX_HASH = (
     "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"
 )
 
 
-async def verify_tx_on_bscscan(tx_hash):
+async def verify_tx_on_bscscan(tx_hash, escrow_address):
     url = (
         f"https://api.bscscan.com/api?module=proxy"
         f"&action=eth_getTransactionByHash"
@@ -555,14 +576,14 @@ async def verify_tx_on_bscscan(tx_hash):
                 if data.get("result"):
                     tx = data["result"]
                     to_addr = tx.get("to", "").lower()
-                    if to_addr == ESCROW_ADDRESS.lower():
+                    if to_addr == escrow_address.lower():
                         return True
     except Exception:
         pass
     return False
 
 
-def build_deposit_message(escrow_id, data):
+def build_deposit_message(escrow_id, data, escrow_address):
     seller = escape_html(data["seller"])
     buyer = escape_html(data["buyer"])
     amount = data["amount"]
@@ -586,7 +607,7 @@ def build_deposit_message(escrow_id, data):
 <b>Status</b>: Confirmed &amp; fees agreed.
 📥 Deposit
 Send USDT to
-<code>{ESCROW_ADDRESS}</code>
+<code>{escrow_address}</code>
 Then tap <b>I paid - Submit TX hash</b> below and paste your TX hash \
 (0x...)."""
 
@@ -973,7 +994,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        is_valid = is_master or await verify_tx_on_bscscan(tx_hash)
+        esc_addr = get_escrow_address_for_verification(escrow)
+        is_valid = is_master or await verify_tx_on_bscscan(tx_hash, esc_addr)
 
         if not is_valid:
             err_msg = (
@@ -1356,7 +1378,10 @@ async def handle_fee_acceptance(update: Update,
         both_accepted = seller_accepted and buyer_accepted
 
         if both_accepted:
-            new_message = build_deposit_message(escrow_id, escrow)
+            esc_addr = get_next_escrow_address()
+            update_escrow(escrow_id, {"escrow_address": esc_addr})
+            escrow["escrow_address"] = esc_addr
+            new_message = build_deposit_message(escrow_id, escrow, esc_addr)
             new_keyboard = build_deposit_keyboard(escrow_id)
         else:
             new_message = build_fee_acceptance_message(
