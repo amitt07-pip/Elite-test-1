@@ -1031,7 +1031,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"✅ Sending <b>{amount:.1f}</b> to "
+            text=f"✅ Sending <b>{amount:.1f} USDT</b> to "
                  f"{'buyer' if awaiting_buyer else 'seller'} wallet...",
             parse_mode="HTML"
         )
