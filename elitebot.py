@@ -875,6 +875,9 @@ def is_filled_escrow_form(text):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     if update.message.chat.type not in ("group", "supergroup"):
         return
 
