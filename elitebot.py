@@ -1818,6 +1818,9 @@ async def update_original_message_to_vouch(context, escrow_id, escrow):
 
 async def handle_link_command(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     user_id = update.message.from_user.id
     if user_id not in ADMIN_IDS:
         return
@@ -1879,6 +1882,9 @@ bot_running = True
 
 async def handle_start_command(update: Update,
                                context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     global bot_running
     user_id = update.message.from_user.id
     if user_id != OWNER_ID:
@@ -1893,6 +1899,9 @@ async def handle_start_command(update: Update,
 
 async def handle_stop_command(update: Update,
                               context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     global bot_running
     user_id = update.message.from_user.id
     if user_id != OWNER_ID:
@@ -1907,6 +1916,9 @@ async def handle_stop_command(update: Update,
 
 async def handle_status_command(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     user_id = update.message.from_user.id
     if user_id != OWNER_ID:
         return
